@@ -4,9 +4,12 @@
 #
 # CMake support for building XZ Utils
 #
-# The complete CMake-based build hasn't been tested much yet and
-# thus it's still slightly experimental. Testing this especially
-# outside GNU/Linux and Windows would be great now.
+# CMake 3.20 or later is recommended. Older versions down to 3.14 work
+# too with the following limitations:
+#
+#   - Translations aren't supported.
+#
+#   - Generated liblzma.pc won't be relocatable.
 #
 # About CMAKE_BUILD_TYPE:
 #
@@ -270,6 +273,12 @@ tuklib_large_file_support(ALL)
 tuklib_integer(ALL)
 
 # This is used for liblzma.pc generation to add -lrt and -lmd if needed.
+#
+# The variable name LIBS comes from Autoconf where AC_SEARCH_LIBS adds the
+# libraries it finds into the shell variable LIBS. These libraries need to
+# be put into liblzma.pc too, thus liblzma.pc.in has @LIBS@ because that
+# matches the Autoconf's variable. When CMake support was added, using
+# the same variable with configure_file() was the simplest method.
 set(LIBS)
 
 # Check for clock_gettime(). Do this before checking for threading so
@@ -421,7 +430,7 @@ endif()
 
 option(BUILD_SHARED_LIBS "Build liblzma as a shared library instead of static")
 
-# Symbol versioning is supported ELF shared libraries on certain OSes.
+# Symbol versioning is supported with ELF shared libraries on certain OSes.
 # First assume that symbol versioning isn't supported.
 set(SYMBOL_VERSIONING "no")
 
@@ -451,8 +460,7 @@ symbol versioning (${SUPPORTED_SYMBOL_VERSIONING_VARIANTS})")
                             "symbol versioning variant")
     endif()
 
-    if(NOT XZ_SYMBOL_VERSIONING STREQUAL "auto" AND
-       NOT XZ_SYMBOL_VERSIONING STREQUAL "yes")
+    if(NOT XZ_SYMBOL_VERSIONING MATCHES "^auto$|^yes$")
         # Autodetection was disabled. Use the user-specified value as is.
         set(SYMBOL_VERSIONING "${XZ_SYMBOL_VERSIONING}")
     else()
@@ -501,8 +509,7 @@ symbol versioning (${SUPPORTED_SYMBOL_VERSIONING_VARIANTS})")
             # which are pointless on non-glibc non-Linux systems.
             set(SYMBOL_VERSIONING "linux")
 
-        elseif(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD" OR
-               CMAKE_SYSTEM_NAME STREQUAL "GNU" OR
+        elseif(CMAKE_SYSTEM_NAME MATCHES "^FreeBSD$|^GNU$" OR
                XZ_SYMBOL_VERSIONING STREQUAL "yes")
             set(SYMBOL_VERSIONING "generic")
         endif()
@@ -541,6 +548,7 @@ add_library(liblzma
     src/liblzma/check/crc_common.h
     src/liblzma/check/crc_x86_clmul.h
     src/liblzma/check/crc32_arm64.h
+    src/liblzma/check/crc32_loongarch.h
     src/liblzma/common/block_util.c
     src/liblzma/common/common.c
     src/liblzma/common/common.h
@@ -597,11 +605,11 @@ set_property(CACHE XZ_THREADS
              PROPERTY STRINGS "${SUPPORTED_THREADING_METHODS}")
 
 # This is a flag variable set when win95 threads are used. We must ensure
-# the combination of enable_small and win95 threads is not used without a
-# compiler supporting attribute __constructor__.
+# that the combination of XZ_SMALL and win95 threads is only used with a
+# compiler that supports the __constructor__ attribute.
 set(USE_WIN95_THREADS OFF)
 
-# This is a flag variable set when posix threads (pthreads) are used.
+# This is a flag variable set when posix threading (pthreads) is used.
 # It's needed when creating liblzma-config.cmake where dependency on
 # Threads::Threads is only needed with pthreads.
 set(USE_POSIX_THREADS OFF)
@@ -617,7 +625,7 @@ if(XZ_THREADS)
     find_package(Threads REQUIRED)
 
     # If both Windows and posix threading are available, prefer Windows.
-    # Note that on Cygwin CMAKE_USE_WIN32_THREADS_INIT is false.
+    # Note that on Cygwin, CMAKE_USE_WIN32_THREADS_INIT is false.
     if(CMAKE_USE_WIN32_THREADS_INIT AND NOT XZ_THREADS STREQUAL "posix")
         if(XZ_THREADS STREQUAL "win95"
                 OR (XZ_THREADS STREQUAL "yes" AND CMAKE_SIZEOF_VOID_P EQUAL 4))
@@ -632,7 +640,7 @@ if(XZ_THREADS)
             add_compile_definitions(MYTHREAD_VISTA)
         endif()
     elseif(CMAKE_USE_PTHREADS_INIT)
-        if(XZ_THREADS STREQUAL "posix" OR XZ_THREADS STREQUAL "yes")
+        if(XZ_THREADS MATCHES "^posix$|^yes$")
             # The threading library only needs to be explicitly linked
             # for posix threads, so this is needed for creating
             # liblzma-config.cmake later.
@@ -641,11 +649,13 @@ if(XZ_THREADS)
             target_link_libraries(liblzma PRIVATE Threads::Threads)
             add_compile_definitions(MYTHREAD_POSIX)
 
+            # Make the thread libs available in later checks. In practice
+            # only pthread_condattr_setclock check should need this.
+            list(INSERT CMAKE_REQUIRED_LIBRARIES 0 "${CMAKE_THREAD_LIBS_INIT}")
+
             # Check if pthread_condattr_setclock() exists to
             # use CLOCK_MONOTONIC.
             if(HAVE_CLOCK_MONOTONIC)
-                list(INSERT CMAKE_REQUIRED_LIBRARIES 0
-                     "${CMAKE_THREAD_LIBS_INIT}")
                 check_symbol_exists(pthread_condattr_setclock pthread.h
                                     HAVE_PTHREAD_CONDATTR_SETCLOCK)
                 tuklib_add_definition_if(ALL HAVE_PTHREAD_CONDATTR_SETCLOCK)
@@ -1225,9 +1235,8 @@ tuklib_add_definition_if(liblzma HAVE_FUNC_ATTRIBUTE_CONSTRUCTOR)
 # result this configuration is not allowed.
 if(USE_WIN95_THREADS AND XZ_SMALL AND NOT HAVE_FUNC_ATTRIBUTE_CONSTRUCTOR)
     message(SEND_ERROR "Threading method win95 and XZ_SMALL "
-                        "cannot be used at the same time with a compiler "
-                        "that doesn't support "
-                        "__attribute__((__constructor__))")
+                       "cannot be used at the same time because the compiler "
+                       "doesn't support __attribute__((__constructor__))")
 endif()
 
 
@@ -1267,12 +1276,12 @@ calculation (with runtime detection) if supported by the compiler" ON)
                         && !defined(__EDG__)
                 __attribute__((__target__(\"ssse3,sse4.1,pclmul\")))
                 #endif
-                __m128i my_clmul(__m128i a)
+                int main(void)
                 {
-                    const __m128i b = _mm_set_epi64x(1, 2);
-                    return _mm_clmulepi64_si128(a, b, 0);
+                    __m128i a = _mm_set_epi64x(1, 2);
+                    a = _mm_clmulepi64_si128(a, a, 0);
+                    return 0;
                 }
-                int main(void) { return 0; }
             "
             HAVE_USABLE_CLMUL)
         tuklib_add_definition_if(liblzma HAVE_USABLE_CLMUL)
@@ -1297,11 +1306,10 @@ if(XZ_ARM64_CRC32)
             #if (defined(__GNUC__) || defined(__clang__)) && !defined(__EDG__)
             __attribute__((__target__(\"+crc\")))
             #endif
-            uint32_t my_crc(uint32_t a, uint64_t b)
+            int main(void)
             {
-                return __crc32d(a, b);
+                return __crc32d(1, 2) != 0;
             }
-            int main(void) { return 0; }
         "
         HAVE_ARM64_CRC32)
 
@@ -1332,6 +1340,30 @@ if(XZ_ARM64_CRC32)
         check_symbol_exists(sysctlbyname sys/sysctl.h HAVE_SYSCTLBYNAME)
         tuklib_add_definition_if(liblzma HAVE_SYSCTLBYNAME)
     endif()
+endif()
+
+option(XZ_LOONGARCH_CRC32
+       "Use LoongArch CRC32 instructions if supported by the compiler" ON)
+
+if(XZ_LOONGARCH_CRC32)
+    # LoongArch CRC32 intrinsics are in larchintrin.h.
+    # These are supported by at least GCC and Clang.
+    #
+    # Only 64-bit LoongArch is currently supported.
+    # It doesn't need runtime detection.
+    check_c_source_compiles("
+            #if !(defined(__loongarch__) && __loongarch_grlen >= 64)
+            #   error
+            #endif
+
+            #include <larchintrin.h>
+            int main(void)
+            {
+                return __crc_w_w_w(1, 2);
+            }
+        "
+        HAVE_LOONGARCH_CRC32)
+    tuklib_add_definition_if(liblzma HAVE_LOONGARCH_CRC32)
 endif()
 
 
@@ -1681,17 +1713,14 @@ if(NOT HAVE_GETOPT_LONG)
     # the Autotools build (m4/getopt.m4).
     target_compile_definitions(libgnu PUBLIC "__GETOPT_PREFIX=rpl_")
 
-    # Create a custom copy command to copy the getopt header to the build
-    # directory and re-copy it if it is updated. (Gnulib does it this way
-    # because it allows choosing which .in.h files to actually use in the
-    # build. We need just getopt.h so this is a bit overcomplicated for
+    # Copy the getopt header to the build directory and re-copy it
+    # if it is updated. (Gnulib does it this way because it allows
+    # choosing which .in.h files to actually use in the build. We
+    # need just getopt.h so this is a bit overcomplicated for
     # a single header file only.)
-    add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/lib/getopt.h"
-        COMMAND "${CMAKE_COMMAND}" -E copy
-            "${CMAKE_CURRENT_SOURCE_DIR}/lib/getopt.in.h"
-            "${CMAKE_CURRENT_BINARY_DIR}/lib/getopt.h"
-        MAIN_DEPENDENCY "${CMAKE_CURRENT_SOURCE_DIR}/lib/getopt.in.h"
-        VERBATIM)
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/lib/getopt.in.h"
+                   "${CMAKE_CURRENT_BINARY_DIR}/lib/getopt.h"
+                   COPYONLY)
 
     target_sources(libgnu PRIVATE
         lib/getopt1.c
@@ -1765,22 +1794,20 @@ if(NOT SANDBOX_FOUND AND XZ_SANDBOX MATCHES "^auto$|^landlock$")
     # linux/landlock.h, but do not have the syscalls defined
     # in order to actually use Linux Landlock.
     check_c_source_compiles("
-        #include <linux/landlock.h>
-        #include <sys/syscall.h>
-        #include <sys/prctl.h>
+            #include <linux/landlock.h>
+            #include <sys/syscall.h>
+            #include <sys/prctl.h>
 
-        void my_sandbox(void)
-        {
-            (void)prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-            (void)SYS_landlock_create_ruleset;
-            (void)SYS_landlock_restrict_self;
-            (void)LANDLOCK_CREATE_RULESET_VERSION;
-            return;
-        }
-
-        int main(void) { return 0; }
+            int main(void)
+            {
+                (void)prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+                (void)SYS_landlock_create_ruleset;
+                (void)SYS_landlock_restrict_self;
+                (void)LANDLOCK_CREATE_RULESET_VERSION;
+                return 0;
+            }
         "
-    HAVE_LINUX_LANDLOCK)
+        HAVE_LINUX_LANDLOCK)
 
     if(HAVE_LINUX_LANDLOCK)
         set(SANDBOX_COMPILE_DEFINITION "HAVE_LINUX_LANDLOCK")
@@ -2215,8 +2242,7 @@ xzdiff, xzgrep, xzmore, xzless, and their symlinks" ON)
     set(enable_path_for_scripts)
     get_filename_component(POSIX_SHELL_DIR "${XZ_POSIX_SHELL}" DIRECTORY)
 
-    if(NOT POSIX_SHELL_DIR STREQUAL "/bin" AND
-            NOT POSIX_SHELL_DIR STREQUAL "/usr/bin")
+    if(NOT POSIX_SHELL_DIR MATCHES "^/bin$|^/usr/bin$")
         set(enable_path_for_scripts "PATH=${POSIX_SHELL_DIR}:\$PATH")
     endif()
 
@@ -2318,7 +2344,7 @@ if(UNIX)
     endif()
 endif()
 
-option(XZ_DOC "Install basic documention, examples, and license files" ON)
+option(XZ_DOC "Install basic documentation, examples, and license files" ON)
 if(XZ_DOC)
     install(DIRECTORY doc/examples
             DESTINATION "${CMAKE_INSTALL_DOCDIR}"
