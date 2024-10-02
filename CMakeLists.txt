@@ -183,7 +183,7 @@ include(GNUInstallDirs)
 #
 # CMake 3.27 doesn't have CMAKE_RC_COMPILER_ID so we rely on
 # CMAKE_C_COMPILER_ID.
-if((MINGW OR CYGWIN OR MSYS) AND (
+if((MINGW OR CYGWIN) AND (
         NOT CMAKE_C_COMPILER_ID STREQUAL "Clang" OR
         CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL "17"))
     # Use workarounds with GNU windres and llvm-windres >= 17.0.0. The \x20
@@ -202,6 +202,30 @@ else()
     set(PACKAGE_NAME_DEFINITION "${PACKAGE_NAME}")
     set(LOCALEDIR_DEFINITION "${CMAKE_INSTALL_FULL_LOCALEDIR}")
 endif()
+
+# When used with MSVC, CMake can merge .manifest files with
+# linker-generated manifests and embed the result in an executable.
+# However, when paired with MinGW-w64, CMake (3.30) ignores .manifest
+# files. Embedding a manifest with a resource file works with both
+# toochains. It's also the way to do it with Autotools.
+#
+# With MSVC, we need to disable the default manifest; attempting to add
+# two manifest entries would break the build. The flag /MANIFEST:NO
+# goes to the linker and it also affects behavior of CMake itself: it
+# looks what flags are being passed to the linker and when CMake sees
+# the /MANIFEST:NO option, other manifest-related linker flags are
+# no longer added (see the file Source/cmcmd.cxx in CMake).
+#
+# See: https://gitlab.kitware.com/cmake/cmake/-/issues/23066
+if(MSVC)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /MANIFEST:NO")
+endif()
+
+# Dependencies for all Windows resource files:
+set(W32RES_DEPENDENCIES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/common/common_w32res.rc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/common/w32_application.manifest"
+)
 
 # Definitions common to all targets:
 add_compile_definitions(
@@ -1370,20 +1394,24 @@ else()
     target_compile_definitions(liblzma PRIVATE HAVE_VISIBILITY=0)
 endif()
 
-if(WIN32)
+if(WIN32 OR CYGWIN)
     if(BUILD_SHARED_LIBS)
         # Add the Windows resource file for liblzma.dll.
         target_sources(liblzma PRIVATE src/liblzma/liblzma_w32res.rc)
 
-        set_target_properties(liblzma PROPERTIES
-            LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/common/common_w32res.rc"
+        set_source_files_properties(src/liblzma/liblzma_w32res.rc PROPERTIES
+            OBJECT_DEPENDS "${W32RES_DEPENDENCIES}"
         )
 
         # Export the public API symbols with __declspec(dllexport).
         target_compile_definitions(liblzma PRIVATE DLL_EXPORT)
 
-        if(NOT MSVC)
-            # Create a DEF file. The linker puts the ordinal numbers there
+        if(NOT MSVC AND NOT CYGWIN)
+            # Create a DEF file. The Autotools-based build creates a DEF file
+            # under Cygwin & MSYS2 too but it almost certainly is a useless
+            # file in that context, so the CMake build omits it.
+            #
+            # The linker puts the ordinal numbers in the DEF file
             # too so the output from the linker isn't our final file.
             target_link_options(liblzma PRIVATE
                                 "-Wl,--output-def,liblzma.def.in")
@@ -1848,11 +1876,12 @@ if(HAVE_DECODERS)
 
         target_link_libraries("${XZDEC}" PRIVATE liblzma libgnu)
 
-        if(WIN32)
+        if(WIN32 OR CYGWIN)
             # Add the Windows resource file for xzdec.exe or lzmadec.exe.
             target_sources("${XZDEC}" PRIVATE "src/xzdec/${XZDEC}_w32res.rc")
-            set_target_properties("${XZDEC}" PROPERTIES
-                LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/common/common_w32res.rc"
+            set_source_files_properties(
+                "src/xzdec/${XZDEC}_w32res.rc" PROPERTIES
+                OBJECT_DEPENDS "${W32RES_DEPENDENCIES}"
             )
         endif()
 
@@ -1916,11 +1945,11 @@ if(XZ_TOOL_LZMAINFO AND HAVE_DECODERS)
 
     target_link_libraries(lzmainfo PRIVATE liblzma libgnu)
 
-    if(WIN32)
+    if(WIN32 OR CYGWIN)
         # Add the Windows resource file for lzmainfo.exe.
         target_sources(lzmainfo PRIVATE src/lzmainfo/lzmainfo_w32res.rc)
-        set_target_properties(lzmainfo PROPERTIES
-            LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/common/common_w32res.rc"
+        set_source_files_properties(src/lzmainfo/lzmainfo_w32res.rc PROPERTIES
+            OBJECT_DEPENDS "${W32RES_DEPENDENCIES}"
         )
     endif()
 
@@ -2029,11 +2058,11 @@ if(XZ_TOOL_XZ)
 this many MiB of RAM if xz cannot determine the amount at runtime")
     target_compile_definitions(xz PRIVATE "ASSUME_RAM=${XZ_ASSUME_RAM}")
 
-    if(WIN32)
+    if(WIN32 OR CYGWIN)
         # Add the Windows resource file for xz.exe.
         target_sources(xz PRIVATE src/xz/xz_w32res.rc)
-        set_target_properties(xz PROPERTIES
-            LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/common/common_w32res.rc"
+        set_source_files_properties(src/xz/xz_w32res.rc PROPERTIES
+            OBJECT_DEPENDS "${W32RES_DEPENDENCIES}"
         )
     endif()
 
